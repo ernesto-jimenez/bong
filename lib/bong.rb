@@ -50,11 +50,10 @@ class Bong
   end
 
   def run
-    servers.each do |server, port|
-      port ||= 80
-      @stats[server] = {}
+    servers.each do |server|
+      @stats[server[:host]] = {}
       uris.each do |uri|
-        run_benchmark(server, port, uri)
+        run_benchmark(server, uri)
       end
     end
   end
@@ -111,7 +110,8 @@ class Bong
     length_of_longest_uri = uris.inject(0) { |length, uri| uri_length = uri.length; (uri_length > length ? uri_length : length) }
     
     output = ["\n#{@label}"]
-    servers.each do |server, port|
+    servers.each do |server|
+      server = server[:host]
       output << "  #{server}"
       uris.each do |uri|
         output << "    #{format_string(uri, length_of_longest_uri)} #{format_rounded(@stats[server][uri]['avg_low'])}-#{format_rounded(@stats[server][uri]['avg_high'])} req/sec"
@@ -139,24 +139,32 @@ class Bong
   # A list of servers and ports from the config file.
 
   def servers
-    @config['servers'].map { |server| server.split(/:/) }
+    @config['servers'].map { |server|
+      server = server.split(/@/)
+      result = {}
+      result[:host], result[:port] = server.pop.split(/:/)
+      result[:port] ||= 80
+      result[:auth] = server.pop
+      result
+    }
   end
 
   def uris
     @config['uris']
   end
 
-  def run_benchmark(server, port, uri)
+  def run_benchmark(server, uri)
     until (sufficient_sample_size?(server, uri) && no_errors?)
       increase_num_conns(server, uri)
-      exec_command(server, port, uri, @num_conns)
-      @stats[server][uri] = parse_results
+      exec_command(server, uri, @num_conns)
+      @stats[server[:host]][uri] = parse_results
     end
   end
 
-  def exec_command(server, port, uri, num_conns)
-    @logger.info "Sending #{@num_conns} hits to #{server}:#{port}#{uri}"
-    cmd = "httperf --server #{server} --port #{port} --uri #{uri} --num-conns #{num_conns}"
+  def exec_command(server, uri, num_conns)
+    @logger.info "Sending #{@num_conns} hits to #{server[:host]}:#{server[:port]}#{uri}"
+    cmd = "httperf --server #{server[:host]} --port #{server[:port]} --uri '#{uri}' --num-conns #{num_conns}"
+    cmd << " --add-header 'Authorization: Basic #{[server[:auth]].pack('m').delete("\r\n")}\n'" if server[:auth]
     @output = `#{cmd}`
   end
 
@@ -179,7 +187,7 @@ class Bong
   end
 
   def sufficient_sample_size?(server, uri)
-    @stats[server][uri]['samples'] >= @config['samples'].to_f
+    @stats[server[:host]][uri]['samples'] >= @config['samples'].to_f
   rescue
     false
   end
@@ -190,8 +198,8 @@ class Bong
   end
 
   def increase_num_conns(server, uri)
-    samples             = @stats[server][uri]['samples']
-    duration            = @stats[server][uri]['duration']
+    samples             = @stats[server[:host]][uri]['samples']
+    duration            = @stats[server[:host]][uri]['duration']
     target_samples      = @config['samples']
 
     seconds_per_request = (duration / @num_conns.to_f) # 0.02
